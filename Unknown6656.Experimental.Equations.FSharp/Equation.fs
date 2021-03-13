@@ -45,7 +45,15 @@ let inline (|Contains|_|) list item = if List.contains item list then Some item 
 
 let (|CacheContains|_|) item = match _fold_cache.TryGetValue item with true, folded -> Some folded | _ -> None
 
-let inline intersect list1 list2 = Set.intersect (Set.ofList list1) (Set.ofList list2) |> Set.toList
+let inline intersect3 (a : 'a seq) b =
+    let only_a = List<'a>()
+    let intersection = List<'a>()
+    for item in a do ((?) (Seq.contains item b) intersection only_a).Add item
+    {|
+        OnlyA = List.ofSeq only_a
+        OnlyB = List.filter (fun item -> not <| Seq.contains item a) b
+        Intersection = List.ofSeq intersection
+    |}
 
 let separate (selector : 'a -> Choice<'b, 'c>) =
     let rec intern acc = function
@@ -127,6 +135,7 @@ type Expression
             | Sum xs -> xs |> List.fold (fun sum elem -> sum + elem.EvaluateAt x) 0.0
             | Product xs -> xs |> List.fold (fun product elem -> product * elem.EvaluateAt x) 1.0
 
+
         member x.Fold =
             let separate_consts_from_vars = separate (fun (x : Expression) -> match x.Fold with Const c -> Choice1Of2 c | other -> Choice2Of2 other)
 
@@ -169,7 +178,7 @@ type Expression
             | CacheContains cached -> cached
             | original ->
                 match original with
-                | Reciprocal x -> Reciprocal x.Fold
+                | Reciprocal x -> Exponentiation(x.Fold, Const -1.0)
                 | Negation x -> Negation x.Fold
                 | Sum xs -> fold_sum xs
                 | Product xs -> fold_product xs
@@ -184,8 +193,6 @@ type Expression
                 | Exponentiation (_, Const 0.0)
                 | Exponentiation (Const 1.0, _) -> Const 1.0
                 | Exponentiation (Const 0.0, _) -> Const 0.0
-                | Exponentiation (x, Negation y) -> Reciprocal (Exponentiation (x, y))
-                | Exponentiation (x, Const y) when y < 0.0 -> Reciprocal (Exponentiation (x, Const -y))
                 | Exponentiation (x, Exponentiation (y, z)) -> Exponentiation (x, Product [y; z])
                 | Sum xs ->
                     xs
@@ -194,9 +201,10 @@ type Expression
                         | Const 0.0, a -> Some a
                         | Negation a, b when a = b -> Some (Const 0.0)
                         | Product a, Product b ->
-                            match intersect a b with
+                            let res = intersect3 a b
+                            match res.Intersection with
                             | [] -> None
-                            | factors -> (Sum [Product(List.except factors a); Product(List.except factors b)])::factors
+                            | factors -> (Sum [Product res.OnlyA; Product res.OnlyB])::factors
                                          |> Product
                                          |> Some
                         | _ -> None)
@@ -209,28 +217,53 @@ type Expression
                         | Const 0.0, _ -> Some (Const 0.0)
                         | Reciprocal a, b when a = b -> Some (Const 1.0)
                         | Exponentiation (a, b), Exponentiation (c, d) when a = c -> Some(Exponentiation(a, Sum[b; d]))
+                        | Exponentiation (a, b), Exponentiation (c, d) when b = d -> Some(Exponentiation(Product[a; c], b))
                         | _ -> None)
                     |> Product
                 | a -> a
                 |> fun folded ->
                     _fold_cache.[x] <- folded
-
-
-                    let o = sprintf "%70O" original
-                    let f = sprintf "%70O" folded
-                    printfn "%s   -->   %s" o f
+                    // printfn "%70O   -->   %70O" original folded
                     if folded = original then
                         folded
                     else
                         folded.Fold
 
-        member x.SolveFor result =
-            match x.Fold with
-            | Variable -> Values [result]
-            | Const c when c = result -> All
-            | Const _ -> Empty
+        member x.SolveForZero() =
+            let x = x.Fold
+            printfn "SOLVING  %O  ==  0" x
+            match x with
+            | Variable ->
+                printfn "FINAL    x -> 0"
+                Values [0.0]
+            | Const 0.0 ->
+                printfn "FINAL    0 -> ∀"
+                All
+            | Const c ->
+                printfn "FINAL    %f -> {}" c
+                Empty
+            | Negation x -> x.SolveForZero()
+            | Sum ((Const c)::xs) -> (Sum xs).SolveFor -c
+            | Product ((Const c)::xs) -> (Product xs).SolveFor (1.0 / c)
+
+
+            //| Sum sum ->
+
+
             //| Sum (Const a, b) -> b.SolveFor (result - a)
             //| Sum (a, Const b) -> a.SolveFor (result - b)
             //| Product (Const a, b) -> b.SolveFor (result / a)
             //| Product (a, Const b) -> a.SolveFor (result / b)
             | a -> failwithf "TODO: %O" a
+
+        member x.SolveFor result =
+            let x = x.Fold
+            printfn "SOLVING  %O  ==  %f" x result
+            match x with
+            | Variable -> Values [result]
+            | Const c when c = result -> All
+            | Const _ -> Empty
+            | Negation x -> x.SolveFor -result
+            | x ->
+                printfn "SOLVING  %O  ==  %f" x result
+                (Sum [x; Const -result]).SolveForZero()
