@@ -1,4 +1,4 @@
-﻿module Equation
+﻿module Unknown6656.Experimental.Equations.Equation
 
 open System.Collections.Generic
 

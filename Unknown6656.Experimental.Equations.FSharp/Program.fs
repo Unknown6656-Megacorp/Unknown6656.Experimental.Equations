@@ -1,4 +1,4 @@
-﻿open System
+﻿module Unknown6656.Experimental.Equations.Program
 
 open Equation
 
