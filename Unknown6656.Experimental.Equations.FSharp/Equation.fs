@@ -1,5 +1,41 @@
 ﻿module Equation
 
+open System.Collections.Generic
+
+
+type Solution =
+    | Empty
+    | Values of float list
+    | All
+
+type Expression =
+    | Variable
+    | Const of float
+    | Negation of Expression
+    | Reciprocal of Expression
+    | Sum of Expression list
+    | Product of Expression list
+    | Exponentiation of Expression * Expression
+    with
+        override this.ToString() =
+            match this with
+            | Variable -> "x"
+            | Const x -> x.ToString()
+            | Negation x -> sprintf "-(%O)" x
+            | Reciprocal x -> sprintf "1/(%O)" x
+            | Sum xs -> xs
+                        |> Seq.map (fun x -> x.ToString())
+                        |> String.concat " + "
+                        |> sprintf "(%s)"
+            | Product xs -> xs
+                            |> Seq.map (fun x -> x.ToString())
+                            |> String.concat " * "
+                            |> sprintf "(%s)"
+            | Exponentiation (a, b) -> sprintf "(%O)^(%O)" a b
+
+
+let internal _fold_cache = Dictionary<Expression, Expression>()
+
 
 let inline (||>>) (f, g) (x, y) = (f x, g y)
 
@@ -7,13 +43,17 @@ let inline (?) c a b = if c then a else b
 
 let inline (|Contains|_|) list item = if List.contains item list then Some item else None
 
+let (|CacheContains|_|) item = match _fold_cache.TryGetValue item with true, folded -> Some folded | _ -> None
+
+let inline intersect list1 list2 = Set.intersect (Set.ofList list1) (Set.ofList list2) |> Set.toList
+
 let separate (selector : 'a -> Choice<'b, 'c>) =
     let rec intern acc = function
                          | [] -> acc
                          | x::xs ->
                              let acc = match selector x with
-                                       | Choice1Of2 a -> a::(fst acc), snd acc
-                                       | Choice2Of2 b -> fst acc, b::(snd acc)
+                                       | Choice1Of2 a -> (fst acc)@[a], snd acc
+                                       | Choice2Of2 b -> fst acc, (snd acc)@[b]
                              intern acc xs
     intern ([], [])
 
@@ -31,65 +71,41 @@ let rec process_pairwise func =
         match tail with
         | [] -> head::acc@tail
         | y::ys ->
-            match func head y with
+            match func (head, y) with
             | Some r -> r::acc@(loop_list ys)
             | None ->
-            match func y head with
+            match func (y, head) with
             | Some r -> r::acc@(loop_list ys)
             | None -> loop func head (acc@[y]) ys
     and loop_list list = match list with
                          | []
                          | [_] -> list
-                         | y::ys -> 
+                         | y::ys ->
                             match loop func y [] ys with
                             | x::xs -> x::loop_list xs
                             | l -> l
     loop_list
 
-type Solution =
-    | Empty
-    | Values of float list
-    | All
 
-type Expression =
-    | Variable
-    | Const of float
-    | Negation of Expression
-    | Reciprocal of Expression
-    | Sum of Expression list
-    | Product of Expression list
-    | Exponentiation of Expression * Expression
+
+type Expression
     with
         static member private sort a b =
             let order = function
-                        | Const -> 0
+                        | Const _ -> 0
                         | Variable _ -> 1
                         | Negation _ -> 2
                         | Reciprocal _ -> 3
                         | Sum _ -> 4
                         | Product _ -> 5
                         | Exponentiation _ -> 6
-            order a
+            (order a).CompareTo(order b)
 
         static member Difference a b = Sum [a; Negation b]
 
         static member Division a b = Product [a; Reciprocal b]
 
-        override this.ToString() =
-            match this with
-            | Variable -> "x"
-            | Const x -> x.ToString()
-            | Negation x -> sprintf "-(%A)" x
-            | Reciprocal x -> sprintf "1/(%A)" x
-            | Sum xs -> xs
-                        |> Seq.map (fun x -> x.ToString())
-                        |> String.concat " + "
-                        |> sprintf "(%s)"
-            | Product xs -> xs
-                            |> Seq.map (fun x -> x.ToString())
-                            |> String.concat " * "
-                            |> sprintf "(%s)"
-            | Exponentiation (a, b) -> sprintf "(%A)^(%A)" a b
+        static member ClearFoldCache = _fold_cache.Clear
 
         member x.IsConstant =
             match x with
@@ -112,79 +128,101 @@ type Expression =
             | Product xs -> xs |> List.fold (fun product elem -> product * elem.EvaluateAt x) 1.0
 
         member x.Fold =
-            let separate = separate (fun (x : Expression) ->
-                                        match x.Fold with
-                                        | Const c -> Choice1Of2 c
-                                        | _ -> Choice2Of2 x
-                                    )
+            let separate_consts_from_vars = separate (fun (x : Expression) -> match x.Fold with Const c -> Choice1Of2 c | other -> Choice2Of2 other)
 
             let rec fold_sum items =
-                let consts, vars = separate items
+                let consts, vars = separate_consts_from_vars items
                 let vars = vars
-                           |> List.collect (function Sum xs -> fold_sum xs | x -> [x])
+                           |> List.map (function Sum xs -> fold_sum xs | x -> x)
+                           |> List.collect (function Sum xs -> xs | x -> [x])
                            |> List.groupBy id
                            |> List.map (fun (e, l) -> if l.Length > 1 then Product [Const (float l.Length); e] else e)
-                (consts
-                |> List.fold (+) 0.0
-                |> Const)
-                :: vars
-                
+                match List.fold (+) 0.0 consts with
+                | 0.0 -> Sum vars
+                | sum -> Sum ((Const sum)::vars)
+                |> function
+                | Sum [] -> Const 0.0
+                | Sum [x] -> x
+                | other -> other
+
             let rec fold_product items =
-                let consts, vars = separate items
+                let consts, vars = separate_consts_from_vars items
                 let vars = vars
-                            |> List.collect (function Product xs -> fold_product xs | x -> [x])
-                            |> List.groupBy id
-                            |> List.map (fun (e, l) -> if l.Length > 1 then Exponentiation (e, Const (float l.Length)) else e)
-                (consts
-                |> List.fold (*) 1.0
-                |> Const)
-                :: vars
+                           |> List.map (function Product xs -> fold_product xs | x -> x)
+                           |> List.collect (function Product xs -> xs | x -> [x])
+                           |> List.groupBy id
+                           |> List.map (fun (e, l) -> if l.Length > 1 then Exponentiation (e, Const (float l.Length)) else e)
+                           |> List.sortWith Expression.sort
+                match List.fold (*) 1.0 consts with
+                | -1.0 -> Negation (Product vars)
+                | 1.0 -> Product vars
+                | 0.0 -> Const 0.0
+                | factor -> Product ((Const factor)::vars)
+                |> function
+                | Product [] -> Const 1.0
+                | Product [x] -> x
+                | other -> other
 
-            let original = x
-            let folded = match x with
-                         | Variable
-                         | Const _ -> x
-                         | Reciprocal x -> Reciprocal x.Fold
-                         | Negation x -> Negation x.Fold
-                         | Sum xs -> (fold_sum >> Sum) xs
-                         | Product xs -> (fold_product >> Product) xs
-                         | Exponentiation (a, b) -> Exponentiation (a.Fold, b.Fold)
-                         |> function
-                         | Negation (Const x) -> Const -x
-                         | Reciprocal (Const x) -> Const (1.0 / x)
-                         | Negation (Negation x)
-                         | Reciprocal (Reciprocal x)
-                         | Exponentiation (x, Const 1.0) -> x
-                         | Exponentiation (_, Const 0.0)
-                         | Exponentiation (Const 1.0, _) -> Const 1.0
-                         | Exponentiation (Const 0.0, _) -> Const 0.0
-                         | Exponentiation (x, Negation y) -> Reciprocal (Exponentiation (x, y))
-                         | Exponentiation (x, Const y) when y < 0.0 -> Reciprocal (Exponentiation (x, Const -y))
-                         | Exponentiation (x, Exponentiation (y, z)) -> Exponentiation (x, Product [y; z])
-                         | Sum [] -> Const 0.0
-                         | Product [] -> Const 1.0
-                         | Sum [x] | Product [x] -> x
-                         | Sum xs ->
-                             xs
-                             |> process_pairwise (fun a b ->
-                                 //printf "fold %O and %O" a b
-                                 None
-                             )
-                             |> Sum
-                         | Product xs ->
-                             xs
-                             |> process_pairwise (fun a b ->
-                                 //printf "fold %O and %O" a b
-                                 None
-                             )
-                             |> Product
-                         | a -> a
+            match x with
+            | Variable
+            | Const _ -> x
+            | CacheContains cached -> cached
+            | original ->
+                match original with
+                | Reciprocal x -> Reciprocal x.Fold
+                | Negation x -> Negation x.Fold
+                | Sum xs -> fold_sum xs
+                | Product xs -> fold_product xs
+                | Exponentiation (a, b) -> Exponentiation (a.Fold, b.Fold)
+                | other -> failwithf "INVALID PROGRAM STATE:  %O" other
+                |> function
+                | Negation (Const x) -> Const -x
+                | Reciprocal (Const x) -> Const (1.0 / x)
+                | Negation (Negation x)
+                | Reciprocal (Reciprocal x)
+                | Exponentiation (x, Const 1.0) -> x
+                | Exponentiation (_, Const 0.0)
+                | Exponentiation (Const 1.0, _) -> Const 1.0
+                | Exponentiation (Const 0.0, _) -> Const 0.0
+                | Exponentiation (x, Negation y) -> Reciprocal (Exponentiation (x, y))
+                | Exponentiation (x, Const y) when y < 0.0 -> Reciprocal (Exponentiation (x, Const -y))
+                | Exponentiation (x, Exponentiation (y, z)) -> Exponentiation (x, Product [y; z])
+                | Sum xs ->
+                    xs
+                    |> process_pairwise
+                        (function
+                        | Const 0.0, a -> Some a
+                        | Negation a, b when a = b -> Some (Const 0.0)
+                        | Product a, Product b ->
+                            match intersect a b with
+                            | [] -> None
+                            | factors -> (Sum [Product(List.except factors a); Product(List.except factors b)])::factors
+                                         |> Product
+                                         |> Some
+                        | _ -> None)
+                    |> Sum
+                | Product xs ->
+                    xs
+                    |> process_pairwise
+                        (function
+                        | Const 1.0, a -> Some a
+                        | Const 0.0, _ -> Some (Const 0.0)
+                        | Reciprocal a, b when a = b -> Some (Const 1.0)
+                        | Exponentiation (a, b), Exponentiation (c, d) when a = c -> Some(Exponentiation(a, Sum[b; d]))
+                        | _ -> None)
+                    |> Product
+                | a -> a
+                |> fun folded ->
+                    _fold_cache.[x] <- folded
 
-            printfn "%O    =====>    %O" original folded
-            if folded = original then
-                folded
-            else
-                folded.Fold
+
+                    let o = sprintf "%70O" original
+                    let f = sprintf "%70O" folded
+                    printfn "%s   -->   %s" o f
+                    if folded = original then
+                        folded
+                    else
+                        folded.Fold
 
         member x.SolveFor result =
             match x.Fold with
