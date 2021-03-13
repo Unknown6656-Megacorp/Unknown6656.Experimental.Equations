@@ -135,6 +135,23 @@ type Expression
             | Sum xs -> xs |> List.fold (fun sum elem -> sum + elem.EvaluateAt x) 0.0
             | Product xs -> xs |> List.fold (fun product elem -> product * elem.EvaluateAt x) 1.0
 
+        member x.Derivative =
+            match x.Fold with
+            | Variable -> Const 1.0
+            | Const c -> Const 0.0
+            | Reciprocal x -> Exponentiation(x, Const -1.0).Derivative
+            | Negation x -> Negation x.Derivative
+            | Sum sum -> sum
+                         |> List.map (fun x -> x.Derivative)
+                         |> Sum
+            | Product (x::xs) ->
+                Sum[
+                    Product (x.Derivative::xs)
+                    Product [x; (Product xs).Derivative]
+                ]
+            | Exponentiation(Variable, c) -> Product[c; Exponentiation(Variable, Sum[c; Const -1.0])]
+            | a -> failwithf "TODO: %O" a
+            |> fun d -> d.Fold
 
         member x.Fold =
             let separate_consts_from_vars = separate (fun (x : Expression) -> match x.Fold with Const c -> Choice1Of2 c | other -> Choice2Of2 other)

@@ -14,7 +14,7 @@ let main argv =
     let x = 5.0
     let res = e2.EvaluateAt x
 
-    printfn "\nf(x) = %O\n     = %O\nf(%f) = %f\n" e1 e2 x res
+    printfn "\n f(x) = %O\n      = %O\nf'(x) = %O\nf(%f) = %f\n" e1 e2 e2.Derivative x res
 
     let x' = e2.SolveFor res
     
