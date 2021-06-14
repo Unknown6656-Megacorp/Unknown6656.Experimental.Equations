@@ -21,5 +21,3 @@ let main argv =
     printfn "L(f|%f) = %O" res x'
     0
 
-
-    
